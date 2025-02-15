@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "quicklaunch": {
+      "commandName": "Project",
+      "commandLineArgs": "-folder \"C:\\Users\\marco\\Desktop\\ANDROID\" -config \"tema1.json\" -ext \".lnk\""
+    }
+  }
+}
