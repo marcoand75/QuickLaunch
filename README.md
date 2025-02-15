@@ -1,5 +1,7 @@
 # QuickLaunch
 
+![video](https://github.com/user-attachments/assets/c0390d49-c89b-4217-87c2-07dfad98cd00)
+
 ## Descrizione
 **QuickLaunch** è un'applicazione Windows che mostra un popup con le icone dei file presenti in una cartella specificata. Permette di filtrare i file in base all'estensione e di personalizzare l'aspetto del popup attraverso un file di configurazione JSON.
 
