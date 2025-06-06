@@ -1,299 +1,535 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
+using System.Linq;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 
-class Program
+namespace IconPopupApp
 {
-    [STAThread]
-    static void Main(string[] args)
+    class Program
     {
-        string folderPath = string.Empty;
-        string configFileName = string.Empty;
-        string fileExtension = string.Empty;
+        [STAThread]
+        static void Main(string[] args)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
 
-        // Mostra l'help se non ci sono parametri
-        if (args.Length == 0)
-        {
-            MessageBox.Show(
-                "Utilizzo:\n\n" +
-                "-folder <percorso_cartella>\nSpecifica la cartella contenente i file.\n\n" +
-                "-config <file_config>\nSpecifica il file di configurazione JSON (opzionale).\n\n" +
-                "-ext <estensione>\nFiltra i file per estensione (opzionale).\n\n\n" +
-                "Esempio:\n" +
-                "IconPopup.exe -folder \"C:\\MyFolder\" -config config.json -ext .exe\n",
-                "Help",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information
-            );
-            return;
-        }
-
-        // Parsing dei parametri dalla linea di comando
-        for (int i = 0; i < args.Length; i++)
-        {
-            if (args[i] == "-folder" && i + 1 < args.Length)
-            {
-                folderPath = args[i + 1].Trim('"');
-                i++; // Salta il parametro successivo
-            }
-            else if (args[i] == "-config" && i + 1 < args.Length)
-            {
-                configFileName = args[i + 1].Trim('"');
-                i++;
-            }
-            else if (args[i] == "-ext" && i + 1 < args.Length)
-            {
-                fileExtension = args[i + 1].Trim('"');
-                i++;
-            }
-        }
-
-        // Verifica se la cartella è stata specificata
-        if (string.IsNullOrEmpty(folderPath))
-        {
-            MessageBox.Show("Specifica una cartella.", "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        if (!Directory.Exists(folderPath))
-        {
-            MessageBox.Show("Cartella non trovata.", "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        // Se non viene specificato un file di configurazione, usiamo le impostazioni predefinite
-        IconPopupConfig config;
-        if (string.IsNullOrEmpty(configFileName) || !File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, configFileName)))
-        {
-            config = new IconPopupConfig
-            {
-                CornerRadius = 15, // Arrotondamento di default
-                PanelColor = SystemColors.Window, // Colore di default del pannello
-                TextColor = SystemColors.ControlText, // Colore di default del testo
-                AnimationSpeed = 30 // Velocità di animazione
-            };
-        }
-        else
-        {
-            // Legge e deserializza il file di configurazione
             try
             {
-                string currentDirectory = AppDomain.CurrentDomain.BaseDirectory;
-                string configPath = Path.Combine(currentDirectory, configFileName);
-                string configJson = File.ReadAllText(configPath);
-                config = JsonSerializer.Deserialize<IconPopupConfig>(configJson) ?? new IconPopupConfig();
+                var arguments = ParseArguments(args);
+                if (arguments == null) return;
+
+                var config = LoadConfiguration(arguments.ConfigFileName);
+                Application.Run(new IconPopup(arguments.FolderPath, config, arguments.FileExtension));
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Errore nella lettura del file di configurazione: {ex.Message}", "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Errore critico: {ex.Message}", "Errore",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private static CommandLineArguments ParseArguments(string[] args)
+        {
+            if (args.Length == 0)
+            {
+                ShowHelp();
+                return null;
+            }
+
+            var arguments = new CommandLineArguments();
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                switch (args[i].ToLower())
+                {
+                    case "-folder" when i + 1 < args.Length:
+                        arguments.FolderPath = args[++i].Trim('"');
+                        break;
+                    case "-config" when i + 1 < args.Length:
+                        arguments.ConfigFileName = args[++i].Trim('"');
+                        break;
+                    case "-ext" when i + 1 < args.Length:
+                        arguments.FileExtension = args[++i].Trim('"');
+                        break;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(arguments.FolderPath))
+            {
+                MessageBox.Show("Specifica una cartella valida.", "Errore",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return null;
+            }
+
+            if (!Directory.Exists(arguments.FolderPath))
+            {
+                MessageBox.Show($"Cartella '{arguments.FolderPath}' non trovata.", "Errore",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return null;
+            }
+
+            return arguments;
+        }
+
+        private static void ShowHelp()
+        {
+            const string helpText = @"IconPopup - Visualizzatore file con icone
+
+Utilizzo:
+  IconPopup.exe -folder <percorso> [-config <file>] [-ext <estensione>]
+
+Parametri:
+  -folder   Cartella contenente i file (obbligatorio)
+  -config   File di configurazione JSON (opzionale)
+  -ext      Filtra per estensione file (opzionale)
+
+Esempi:
+  IconPopup.exe -folder ""C:\MyFolder""
+  IconPopup.exe -folder ""C:\MyFolder"" -config settings.json -ext .exe";
+
+            MessageBox.Show(helpText, "Aiuto", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private static IconPopupConfig LoadConfiguration(string configFileName)
+        {
+            var defaultConfig = new IconPopupConfig();
+
+            if (string.IsNullOrWhiteSpace(configFileName))
+                return defaultConfig;
+
+            try
+            {
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, configFileName);
+                if (!File.Exists(configPath))
+                    return defaultConfig;
+
+                string configJson = File.ReadAllText(configPath);
+                var config = JsonSerializer.Deserialize<IconPopupConfig>(configJson, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true,
+                    AllowTrailingCommas = true
+                });
+
+                return config ?? defaultConfig;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Errore nel caricamento configurazione: {ex.Message}\nVerranno usate le impostazioni predefinite.",
+                    "Avviso", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return defaultConfig;
+            }
+        }
+    }
+
+    public class CommandLineArguments
+    {
+        public string FolderPath { get; set; } = string.Empty;
+        public string ConfigFileName { get; set; } = string.Empty;
+        public string FileExtension { get; set; } = string.Empty;
+    }
+
+    public class IconPopupConfig
+    {
+        public int CornerRadius { get; set; } = 15;
+        public int AnimationSpeed { get; set; } = 15;
+        public int MaxHeight { get; set; } = 600;
+        public int IconSize { get; set; } = 32;
+        public int ButtonWidth { get; set; } = 180;
+        public int ButtonHeight { get; set; } = 42;
+        public bool EnableAnimations { get; set; } = true;
+        public bool ShowFileExtensions { get; set; } = false;
+
+        private string _textColorHex = "#000000";
+        public string TextColorHex
+        {
+            get => _textColorHex;
+            set
+            {
+                _textColorHex = value;
+                TextColor = ParseColor(value, Color.Black);
+            }
+        }
+
+        private string _backgroundColorHex = "#F0F0F0";
+        public string BackgroundColorHex
+        {
+            get => _backgroundColorHex;
+            set
+            {
+                _backgroundColorHex = value;
+                BackgroundColor = ParseColor(value, SystemColors.Control);
+            }
+        }
+
+        private string _panelColorHex = "#FFFFFF";
+        public string PanelColorHex
+        {
+            get => _panelColorHex;
+            set
+            {
+                _panelColorHex = value;
+                PanelColor = ParseColor(value, SystemColors.Window);
+            }
+        }
+
+        public Color TextColor { get; private set; } = Color.Black;
+        public Color BackgroundColor { get; private set; } = SystemColors.Control;
+        public Color PanelColor { get; private set; } = SystemColors.Window;
+
+        private static Color ParseColor(string hexValue, Color defaultColor)
+        {
+            if (string.IsNullOrWhiteSpace(hexValue))
+                return defaultColor;
+
+            try
+            {
+                return ColorTranslator.FromHtml(hexValue);
+            }
+            catch
+            {
+                return defaultColor;
+            }
+        }
+    }
+
+    public class IconPopup : Form
+    {
+        private readonly IconPopupConfig _config;
+        private readonly string _folderPath;
+        private readonly string _fileExtension;
+        private readonly List<IDisposable> _disposables = new List<IDisposable>();
+        private CancellationTokenSource _animationCancellation;
+
+        private const int SHADOW_SIZE = 5;
+        private const int MAX_FILENAME_LENGTH = 25;
+
+        public IconPopup(string folderPath, IconPopupConfig config, string fileExtension)
+        {
+            _folderPath = folderPath;
+            _config = config ?? throw new ArgumentNullException(nameof(config));
+            _fileExtension = NormalizeFileExtension(fileExtension);
+
+            InitializeForm();
+            CreateUI();
+            PositionForm();
+        }
+
+        private void InitializeForm()
+        {
+            SuspendLayout();
+
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            FormBorderStyle = FormBorderStyle.None;
+            BackColor = _config.BackgroundColor;
+            Padding = new Padding(10);
+            TopMost = true;
+
+            if (_config.EnableAnimations)
+                Opacity = 0;
+
+            // Eventi
+            Load += OnFormLoad;
+            Deactivate += (s, e) => BeginInvoke(new Action(Close));
+            KeyDown += OnKeyDown;
+
+            ResumeLayout(false);
+        }
+
+        private void CreateUI()
+        {
+            var files = GetFilteredFiles();
+            if (!files.Any())
+            {
+                CreateEmptyStateUI();
                 return;
             }
+
+            var panel = CreateMainPanel();
+            CreateFileButtons(panel, files);
+
+            Controls.Add(panel);
+            AdjustFormSize(panel);
         }
 
-        // Verifica ed eventualmente modifica l'estensione dei file
-        if (!string.IsNullOrEmpty(fileExtension))
+        private string[] GetFilteredFiles()
         {
-            fileExtension = fileExtension.StartsWith(".") ? fileExtension : "." + fileExtension;
-        }
-
-        // Avvia l'applicazione
-        Application.Run(new IconPopup(folderPath, config, fileExtension));
-    }
-}
-
-class IconPopupConfig
-{
-    public int CornerRadius { get; set; } = 15; // Raggio di arrotondamento
-    public int AnimationSpeed { get; set; } = 30; // Raggio di arrotondamento
-
-    private string textColorHex;
-    public string TextColorHex
-    {
-        get => textColorHex;
-        set
-        {
-            textColorHex = value;
-            TextColor = string.IsNullOrEmpty(value) ? Color.Black : ColorTranslator.FromHtml(value);
-        }
-    }
-
-    public Color TextColor { get; set; } = Color.Black; // Default
-
-    // Altri colori già corretti
-    private string backgroundColorHex;
-    public string BackgroundColorHex
-    {
-        get => backgroundColorHex;
-        set
-        {
-            backgroundColorHex = value;
-            BackgroundColor = string.IsNullOrEmpty(value) ? SystemColors.Control : ColorTranslator.FromHtml(value);
-        }
-    }
-
-    private string panelColorHex;
-    public string PanelColorHex
-    {
-        get => panelColorHex;
-        set
-        {
-            panelColorHex = value;
-            PanelColor = string.IsNullOrEmpty(value) ? SystemColors.Window : ColorTranslator.FromHtml(value);
-        }
-    }
-
-    public Color BackgroundColor { get; set; } = SystemColors.Control;
-    public Color PanelColor { get; set; } = SystemColors.Window;
-}
-
-class IconPopup : Form
-{
-    private int _cornerRadius;
-    private int _animationSpeed;
-
-    public IconPopup(string folderPath, IconPopupConfig config, string fileExtension)
-    {
-        Height = Height * 5;
-        _cornerRadius = config.CornerRadius;
-        StartPosition = FormStartPosition.Manual;
-        ShowInTaskbar = false;
-        FormBorderStyle = FormBorderStyle.None; // Finestra non ridimensionabile
-        BackColor = SystemColors.Control; // Colore di sfondo fisso
-        Padding = new Padding(10);
-        _animationSpeed = config.AnimationSpeed;
-
-        // Imposta la regione arrotondata
-        if (_cornerRadius > 0)
-        {
-            SetRoundedRegion();
-        }
-
-        FlowLayoutPanel panel = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.TopDown,
-            Padding = new Padding(5),
-            BackColor = config.PanelColor,
-            BorderStyle = BorderStyle.None
-        };
-        Controls.Add(panel);
-
-        // Verifica che l'estensione inizi con un "."
-        if (!string.IsNullOrEmpty(fileExtension) && !fileExtension.StartsWith("."))
-        {
-            fileExtension = "." + fileExtension;
-        }
-
-        var files = Directory.GetFiles(folderPath, "*" + fileExtension).ToArray();
-
-        foreach (var file in files)
-        {
-            string fileNameWithoutExt = Path.GetFileNameWithoutExtension(file);
-            Panel itemPanel = new Panel
-            {
-                AutoSize = true,
-                Padding = new Padding(5),
-                BackColor = config.PanelColor
-            };
-
-            // Estrazione dell'icona
-            Icon icon = null;
             try
             {
-                icon = Icon.ExtractAssociatedIcon(file);
+                string searchPattern = string.IsNullOrEmpty(_fileExtension) ? "*" : $"*{_fileExtension}";
+                return Directory.GetFiles(_folderPath, searchPattern)
+                    .Where(file => !Path.GetFileName(file).StartsWith("."))
+                    .OrderBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Errore durante l'estrazione dell'icona per {file}: {ex.Message}");
+                MessageBox.Show($"Errore nel leggere i file: {ex.Message}", "Errore",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return Array.Empty<string>();
             }
+        }
 
-            Bitmap iconBitmap;
-            if (icon != null)
+        private FlowLayoutPanel CreateMainPanel()
+        {
+            var panel = new FlowLayoutPanel
             {
-                iconBitmap = new Bitmap(icon.ToBitmap(), new Size(32, 32));  // IconSize fisso a 32
-            }
-            else
-            {
-                Debug.WriteLine($"Icona non trovata per {file}, verrà usata un'icona di default.");
-                iconBitmap = new Bitmap(SystemIcons.Warning.ToBitmap(), new Size(32, 32));  // Icona di default
-            }
-
-            Button iconButton = new Button
-            {
-                Size = new Size(132, 42), // IconSize fisso a 32 + margine
-                Text = fileNameWithoutExt,
-                Image = iconBitmap,
-                ImageAlign = ContentAlignment.MiddleLeft, // Testo in alto
-                TextAlign = ContentAlignment.MiddleRight,
-                Padding = new Padding(5),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = config.PanelColor,
-                ForeColor = config.TextColor, // Colore del testo
-                Tag = file,
-                TextImageRelation = TextImageRelation.ImageBeforeText // Testo non sovrapposto all'icona
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Padding = new Padding(8),
+                BackColor = _config.PanelColor,
+                BorderStyle = BorderStyle.None
             };
 
-            // Rimuove i bordi del pulsante
-            iconButton.FlatAppearance.BorderSize = 0;
-
-            iconButton.Click += (s, e) => Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
-
-            itemPanel.Controls.Add(iconButton);
-            panel.Controls.Add(itemPanel);
+            return panel;
         }
 
-        // Calcola la posizione del popup
-        Point mousePos = Cursor.Position;
-        Screen screen = Screen.FromPoint(mousePos);
-        Rectangle workingArea = screen.WorkingArea;
-
-        // Ridimensiona la finestra in base al contenuto
-        Size = new Size(panel.PreferredSize.Width + Padding.Horizontal - 20, panel.PreferredSize.Height + Padding.Vertical - 20);
-
-        // Imposta l'altezza massima della finestra per non superare l'area di lavoro
-        int maxHeight = workingArea.Height - 20; // Lascia un margine di 20 pixel
-        if (Height > maxHeight)
+        private void CreateFileButtons(FlowLayoutPanel panel, string[] files)
         {
-            Height = maxHeight;
-            panel.AutoScroll = true; // Abilita lo scroll se il contenuto è troppo alto
+            foreach (string file in files)
+            {
+                try
+                {
+                    var button = CreateFileButton(file);
+                    panel.Controls.Add(button);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Errore nella creazione del pulsante per {file}: {ex.Message}");
+                }
+            }
         }
 
-        int x = mousePos.X - Width / 2;
-        int y = workingArea.Bottom - Height;
-
-        // Assicurati che il popup non esca dallo schermo
-        if (x < workingArea.Left)
-            x = workingArea.Left;
-        else if (x + Width > workingArea.Right)
-            x = workingArea.Right - Width;
-
-        Location = new Point(x, y);
-
-        Opacity = 0;
-        Load += async (s, e) => await AnimateOpen();
-        Deactivate += (s, e) => Close();
-        KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
-    }
-
-    private void SetRoundedRegion()
-    {
-        GraphicsPath path = new GraphicsPath();
-        path.AddArc(0, 0, _cornerRadius * 2, _cornerRadius * 2, 180, 90); // Angolo superiore sinistro
-        path.AddArc(Width - _cornerRadius * 2, 0, _cornerRadius * 2, _cornerRadius * 2, 270, 90); // Angolo superiore destro
-        path.AddArc(Width  - _cornerRadius * 2, Height - _cornerRadius * 2, _cornerRadius * 2, _cornerRadius * 2, 0, 90); // Angolo inferiore destro
-        path.AddArc(0, Height - _cornerRadius * 2, _cornerRadius * 2, _cornerRadius * 2, 90, 90); // Angolo inferiore sinistro
-        path.CloseFigure();
-        Region = new Region(path);
-    }
-
-    private async Task AnimateOpen()
-    {
-        int steps = 20; // Più passaggi per un'animazione più fluida
-        for (int i = 0; i <= steps; i++)
+        private Button CreateFileButton(string filePath)
         {
-            Opacity = i / (double)steps;
-            await Task.Delay(_animationSpeed); // Ritardo maggiore per un'animazione più lenta
+            string fileName = _config.ShowFileExtensions
+                ? Path.GetFileName(filePath)
+                : Path.GetFileNameWithoutExtension(filePath);
+
+            fileName = TruncateFileName(fileName);
+
+            var icon = ExtractFileIcon(filePath);
+            _disposables.Add(icon);
+
+            var button = new Button
+            {
+                Size = new Size(_config.ButtonWidth, _config.ButtonHeight),
+                Text = fileName,
+                Image = icon,
+                ImageAlign = ContentAlignment.MiddleLeft,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(_config.IconSize + 10, 0, 5, 0),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = _config.PanelColor,
+                ForeColor = _config.TextColor,
+                Tag = filePath,
+                TextImageRelation = TextImageRelation.ImageBeforeText,
+                UseVisualStyleBackColor = false,
+                Cursor = Cursors.Hand
+            };
+
+            button.FlatAppearance.BorderSize = 0;
+            button.FlatAppearance.MouseOverBackColor = ControlPaint.Light(_config.PanelColor, 0.1f);
+            button.FlatAppearance.MouseDownBackColor = ControlPaint.Dark(_config.PanelColor, 0.1f);
+
+            button.Click += OnFileButtonClick;
+            button.MouseEnter += (s, e) => button.BackColor = button.FlatAppearance.MouseOverBackColor;
+            button.MouseLeave += (s, e) => button.BackColor = _config.PanelColor;
+
+            return button;
+        }
+
+        private Bitmap ExtractFileIcon(string filePath)
+        {
+            try
+            {
+                using var icon = Icon.ExtractAssociatedIcon(filePath);
+                if (icon != null)
+                {
+                    return new Bitmap(icon.ToBitmap(), new Size(_config.IconSize, _config.IconSize));
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Errore estrazione icona per {filePath}: {ex.Message}");
+            }
+
+            // Icona di fallback
+            using var defaultIcon = SystemIcons.Application;
+            return new Bitmap(defaultIcon.ToBitmap(), new Size(_config.IconSize, _config.IconSize));
+        }
+
+        private string TruncateFileName(string fileName)
+        {
+            if (fileName.Length <= MAX_FILENAME_LENGTH)
+                return fileName;
+
+            return fileName.Substring(0, MAX_FILENAME_LENGTH - 3) + "...";
+        }
+
+        private void CreateEmptyStateUI()
+        {
+            var label = new Label
+            {
+                Text = "Nessun file trovato",
+                ForeColor = _config.TextColor,
+                BackColor = _config.PanelColor,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Size = new Size(200, 50),
+                Padding = new Padding(10)
+            };
+
+            Controls.Add(label);
+            Size = new Size(label.Width + Padding.Horizontal, label.Height + Padding.Vertical);
+        }
+
+        private void AdjustFormSize(Control panel)
+        {
+            Size = new Size(
+                panel.PreferredSize.Width + Padding.Horizontal,
+                Math.Min(panel.PreferredSize.Height + Padding.Vertical, _config.MaxHeight)
+            );
+
+            if (panel.PreferredSize.Height + Padding.Vertical > _config.MaxHeight)
+            {
+                if (panel is FlowLayoutPanel flowPanel)
+                {
+                    flowPanel.AutoScroll = true;
+                }
+            }
+
+            if (_config.CornerRadius > 0)
+            {
+                this.BeginInvoke(new Action(SetRoundedRegion));
+            }
+        }
+
+        private void PositionForm()
+        {
+            Point mousePos = Cursor.Position;
+            Screen screen = Screen.FromPoint(mousePos);
+            Rectangle workingArea = screen.WorkingArea;
+
+            int x = Math.Max(workingArea.Left,
+                Math.Min(mousePos.X - Width / 2, workingArea.Right - Width));
+
+            int y = Math.Max(workingArea.Top, workingArea.Bottom - Height - 10);
+
+            Location = new Point(x, y);
+        }
+
+        private void SetRoundedRegion()
+        {
+            if (_config.CornerRadius <= 0 || Width <= 0 || Height <= 0)
+                return;
+
+            using var path = new GraphicsPath();
+            int radius = Math.Min(_config.CornerRadius, Math.Min(Width, Height) / 2);
+
+            path.AddArc(0, 0, radius * 2, radius * 2, 180, 90);
+            path.AddArc(Width - radius * 2 - 1, 0, radius * 2, radius * 2, 270, 90);
+            path.AddArc(Width - radius * 2 - 1, Height - radius * 2 - 1, radius * 2, radius * 2, 0, 90);
+            path.AddArc(0, Height - radius * 2 - 1, radius * 2, radius * 2, 90, 90);
+            path.CloseFigure();
+
+            Region = new Region(path);
+        }
+
+        private static string NormalizeFileExtension(string extension)
+        {
+            if (string.IsNullOrWhiteSpace(extension))
+                return string.Empty;
+
+            return extension.StartsWith(".") ? extension : "." + extension;
+        }
+
+        private async void OnFormLoad(object sender, EventArgs e)
+        {
+            if (_config.EnableAnimations)
+            {
+                _animationCancellation = new CancellationTokenSource();
+                await AnimateOpen(_animationCancellation.Token);
+            }
+        }
+
+        private async Task AnimateOpen(CancellationToken cancellationToken)
+        {
+            const int steps = 10;
+
+            try
+            {
+                for (int i = 0; i <= steps && !cancellationToken.IsCancellationRequested; i++)
+                {
+                    Opacity = (double)i / steps;
+                    await Task.Delay(_config.AnimationSpeed, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Animazione cancellata
+            }
+        }
+
+        private void OnFileButtonClick(object sender, EventArgs e)
+        {
+            if (sender is Button button && button.Tag is string filePath)
+            {
+                try
+                {
+                    var startInfo = new ProcessStartInfo(filePath)
+                    {
+                        UseShellExecute = true,
+                        Verb = "open"
+                    };
+
+                    Process.Start(startInfo);
+                    Close();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Impossibile aprire il file:\n{ex.Message}", "Errore",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void OnKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape)
+                Close();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            _animationCancellation?.Cancel();
+            _animationCancellation?.Dispose();
+
+            foreach (var disposable in _disposables)
+            {
+                disposable?.Dispose();
+            }
+            _disposables.Clear();
+
+            base.OnFormClosed(e);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x00080000; // WS_EX_LAYERED per trasparenza
+                return cp;
+            }
         }
     }
 }
