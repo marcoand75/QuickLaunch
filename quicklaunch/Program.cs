@@ -145,6 +145,10 @@ Esempi:
         public int ButtonHeight { get; set; } = 42;
         public bool EnableAnimations { get; set; } = true;
         public bool ShowFileExtensions { get; set; } = false;
+        public bool EnableGlassEffect { get; set; } = true;
+        public int GlassBlurAmount { get; set; } = 10;
+        public int BorderThickness { get; set; } = 1;
+        public string BorderColorHex { get; set; } = "#404040";
 
         private string _textColorHex = "#000000";
         public string TextColorHex
@@ -229,15 +233,19 @@ Esempi:
             ShowInTaskbar = false;
             FormBorderStyle = FormBorderStyle.None;
             BackColor = _config.BackgroundColor;
-            Padding = new Padding(10);
+            Padding = new Padding(0); // Rimuovi padding per evitare bordi bianchi
             TopMost = true;
+
+            // Imposta il colore di sfondo immediatamente per evitare flash bianchi
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
+            UpdateStyles();
 
             if (_config.EnableAnimations)
                 Opacity = 0;
 
             // Eventi
             Load += OnFormLoad;
-            Deactivate += (s, e) => BeginInvoke(new Action(Close));
+            Deactivate += OnFormDeactivate;
             KeyDown += OnKeyDown;
 
             ResumeLayout(false);
@@ -327,7 +335,7 @@ Esempi:
                 Image = icon,
                 ImageAlign = ContentAlignment.MiddleLeft,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(_config.IconSize + 10, 0, 5, 0),
+                Padding = new Padding(8, 0, 5, 0), // Ridotto padding sinistro per eliminare spazio extra
                 FlatStyle = FlatStyle.Flat,
                 BackColor = _config.PanelColor,
                 ForeColor = _config.TextColor,
@@ -395,11 +403,11 @@ Esempi:
         private void AdjustFormSize(Control panel)
         {
             Size = new Size(
-                panel.PreferredSize.Width + Padding.Horizontal,
-                Math.Min(panel.PreferredSize.Height + Padding.Vertical, _config.MaxHeight)
+                panel.PreferredSize.Width,
+                Math.Min(panel.PreferredSize.Height, _config.MaxHeight)
             );
 
-            if (panel.PreferredSize.Height + Padding.Vertical > _config.MaxHeight)
+            if (panel.PreferredSize.Height > _config.MaxHeight)
             {
                 if (panel is FlowLayoutPanel flowPanel)
                 {
@@ -407,9 +415,17 @@ Esempi:
                 }
             }
 
+            // Applica gli angoli arrotondati dopo che il form è completamente inizializzato
             if (_config.CornerRadius > 0)
             {
-                this.BeginInvoke(new Action(SetRoundedRegion));
+                // Aspetta che il form sia completamente caricato prima di applicare gli angoli arrotondati
+                Load += (s, e) => 
+                {
+                    if (Width > 0 && Height > 0)
+                    {
+                        SetRoundedRegion();
+                    }
+                };
             }
         }
 
@@ -432,16 +448,31 @@ Esempi:
             if (_config.CornerRadius <= 0 || Width <= 0 || Height <= 0)
                 return;
 
-            using var path = new GraphicsPath();
-            int radius = Math.Min(_config.CornerRadius, Math.Min(Width, Height) / 2);
+            try
+            {
+                using var path = new GraphicsPath();
+                int radius = Math.Min(_config.CornerRadius, Math.Min(Width, Height) / 2);
 
-            path.AddArc(0, 0, radius * 2, radius * 2, 180, 90);
-            path.AddArc(Width - radius * 2 - 1, 0, radius * 2, radius * 2, 270, 90);
-            path.AddArc(Width - radius * 2 - 1, Height - radius * 2 - 1, radius * 2, radius * 2, 0, 90);
-            path.AddArc(0, Height - radius * 2 - 1, radius * 2, radius * 2, 90, 90);
-            path.CloseFigure();
+                // Crea un percorso arrotondato più visibile e preciso
+                path.AddArc(0, 0, radius * 2, radius * 2, 180, 90); // Alto sinistra
+                path.AddArc(Width - radius * 2, 0, radius * 2, radius * 2, 270, 90); // Alto destra
+                path.AddArc(Width - radius * 2, Height - radius * 2, radius * 2, radius * 2, 0, 90); // Basso destra
+                path.AddArc(0, Height - radius * 2, radius * 2, radius * 2, 90, 90); // Basso sinistra
+                path.CloseFigure();
 
-            Region = new Region(path);
+                // Applica la regione arrotondata
+                Region = new Region(path);
+                
+                // Forza il ridisegno per mostrare gli angoli arrotondati
+                Invalidate();
+                Update();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Errore nell'applicare gli angoli arrotondati: {ex.Message}");
+                // Fallback: usa una regione rettangolare
+                Region = new Region(new Rectangle(0, 0, Width, Height));
+            }
         }
 
         private static string NormalizeFileExtension(string extension)
@@ -508,6 +539,18 @@ Esempi:
                 Close();
         }
 
+        private void OnFormDeactivate(object sender, EventArgs e)
+        {
+            if (IsHandleCreated)
+            {
+                BeginInvoke(new Action(Close));
+            }
+            else
+            {
+                Close();
+            }
+        }
+
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             _animationCancellation?.Cancel();
@@ -520,6 +563,86 @@ Esempi:
             _disposables.Clear();
 
             base.OnFormClosed(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            
+            if (_config.EnableGlassEffect && _config.CornerRadius > 0)
+            {
+                DrawModernEffect(e.Graphics);
+            }
+        }
+
+        private void DrawModernEffect(Graphics g)
+        {
+            if (Width <= 0 || Height <= 0) return;
+
+            // Crea un percorso per gli angoli arrotondati
+            using var path = new GraphicsPath();
+            int radius = Math.Min(_config.CornerRadius, Math.Min(Width, Height) / 2);
+            
+            // Assicurati che tutti gli angoli siano arrotondati correttamente
+            path.AddArc(0, 0, radius * 2, radius * 2, 180, 90); // Alto sinistra
+            path.AddArc(Width - radius * 2, 0, radius * 2, radius * 2, 270, 90); // Alto destra
+            path.AddArc(Width - radius * 2, Height - radius * 2, radius * 2, radius * 2, 0, 90); // Basso destra
+            path.AddArc(0, Height - radius * 2, radius * 2, radius * 2, 90, 90); // Basso sinistra
+            path.CloseFigure();
+
+            // Disegna un'ombra sofisticata
+            DrawShadowEffect(g, path, radius);
+
+            // Disegna un bordo sottile e moderno
+            if (_config.BorderThickness > 0)
+            {
+                var borderColor = ColorTranslator.FromHtml(_config.BorderColorHex);
+                using var borderPen = new Pen(borderColor, _config.BorderThickness);
+                g.DrawPath(borderPen, path);
+            }
+
+            // Aggiungi un effetto di gradiente moderno
+            DrawModernGradient(g, path);
+        }
+
+        private void DrawShadowEffect(Graphics g, GraphicsPath path, int radius)
+        {
+            // Crea un'ombra morbida attorno al pannello
+            for (int i = 0; i < 3; i++)
+            {
+                using var shadowPath = new GraphicsPath();
+                int offset = i + 1;
+                
+                shadowPath.AddArc(offset, offset, radius * 2, radius * 2, 180, 90);
+                shadowPath.AddArc(Width - radius * 2 - offset, offset, radius * 2, radius * 2, 270, 90);
+                shadowPath.AddArc(Width - radius * 2 - offset, Height - radius * 2 - offset, radius * 2, radius * 2, 0, 90);
+                shadowPath.AddArc(offset, Height - radius * 2 - offset, radius * 2, radius * 2, 90, 90);
+                shadowPath.CloseFigure();
+
+                using var shadowBrush = new SolidBrush(Color.FromArgb(20 - i * 5, Color.Black));
+                g.FillPath(shadowBrush, shadowPath);
+            }
+        }
+
+        private void DrawModernGradient(Graphics g, GraphicsPath path)
+        {
+            // Gradiente moderno che crea profondità
+            using var gradientBrush = new LinearGradientBrush(
+                new Rectangle(0, 0, Width, Height),
+                Color.FromArgb(250, _config.PanelColor),
+                ControlPaint.Light(_config.PanelColor, 0.05f),
+                LinearGradientMode.Vertical);
+            
+            g.FillPath(gradientBrush, path);
+
+            // Aggiungi un leggero riflesso in alto per modernità
+            using var highlightBrush = new LinearGradientBrush(
+                new Rectangle(0, 0, Width, Height / 4),
+                Color.FromArgb(40, Color.White),
+                Color.Transparent,
+                LinearGradientMode.Vertical);
+            
+            g.FillPath(highlightBrush, path);
         }
 
         protected override CreateParams CreateParams

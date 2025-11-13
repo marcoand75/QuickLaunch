@@ -1,6 +1,10 @@
 {
   "TextColorHex": "#FFFFFF",
   "PanelColorHex": "#303030",
-  "CornerRadius": 15,
-  "AnimationSpeed": 0
+  "CornerRadius": 25,
+  "AnimationSpeed": 0,
+  "EnableGlassEffect": true,
+  "GlassBlurAmount": 10,
+  "BorderThickness": 2,
+  "BorderColorHex": "#FFFFFF"
 }
