@@ -402,24 +402,43 @@ Esempi:
 
         private void AdjustFormSize(Control panel)
         {
+            // Forza il layout del pannello per ottenere la PreferredSize corretta
+            panel.Invalidate();
+            panel.Update();
+
+            int panelHeight = panel.PreferredSize.Height;
+            int panelWidth = panel.PreferredSize.Width;
+
+            // Applica la scalatura DPI per supportare monitor ad alta risoluzione
+            float dpiScale = DeviceDpi / 96.0f;
+            int scaledMaxHeight = (int)(_config.MaxHeight * dpiScale);
+
             Size = new Size(
-                panel.PreferredSize.Width,
-                Math.Min(panel.PreferredSize.Height, _config.MaxHeight)
+                panelWidth,
+                Math.Min(panelHeight, scaledMaxHeight)
             );
 
-            if (panel.PreferredSize.Height > _config.MaxHeight)
+            // Abilita AutoScroll sul form per gestire i contenuti che eccedono l'altezza massima
+            if (panelHeight > scaledMaxHeight)
             {
+                AutoScroll = true;
+                AutoScrollMargin = new Size(0, 10);
+                MaximumSize = new Size(0, scaledMaxHeight);
+
                 if (panel is FlowLayoutPanel flowPanel)
                 {
                     flowPanel.AutoScroll = true;
                 }
             }
+            else
+            {
+                AutoScroll = false;
+            }
 
             // Applica gli angoli arrotondati dopo che il form è completamente inizializzato
             if (_config.CornerRadius > 0)
             {
-                // Aspetta che il form sia completamente caricato prima di applicare gli angoli arrotondati
-                Load += (s, e) => 
+                Load += (s, e) =>
                 {
                     if (Width > 0 && Height > 0)
                     {
@@ -462,7 +481,7 @@ Esempi:
 
                 // Applica la regione arrotondata
                 Region = new Region(path);
-                
+
                 // Forza il ridisegno per mostrare gli angoli arrotondati
                 Invalidate();
                 Update();
@@ -568,7 +587,7 @@ Esempi:
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            
+
             if (_config.EnableGlassEffect && _config.CornerRadius > 0)
             {
                 DrawModernEffect(e.Graphics);
@@ -582,7 +601,7 @@ Esempi:
             // Crea un percorso per gli angoli arrotondati
             using var path = new GraphicsPath();
             int radius = Math.Min(_config.CornerRadius, Math.Min(Width, Height) / 2);
-            
+
             // Assicurati che tutti gli angoli siano arrotondati correttamente
             path.AddArc(0, 0, radius * 2, radius * 2, 180, 90); // Alto sinistra
             path.AddArc(Width - radius * 2, 0, radius * 2, radius * 2, 270, 90); // Alto destra
@@ -612,7 +631,7 @@ Esempi:
             {
                 using var shadowPath = new GraphicsPath();
                 int offset = i + 1;
-                
+
                 shadowPath.AddArc(offset, offset, radius * 2, radius * 2, 180, 90);
                 shadowPath.AddArc(Width - radius * 2 - offset, offset, radius * 2, radius * 2, 270, 90);
                 shadowPath.AddArc(Width - radius * 2 - offset, Height - radius * 2 - offset, radius * 2, radius * 2, 0, 90);
@@ -632,7 +651,7 @@ Esempi:
                 Color.FromArgb(250, _config.PanelColor),
                 ControlPaint.Light(_config.PanelColor, 0.05f),
                 LinearGradientMode.Vertical);
-            
+
             g.FillPath(gradientBrush, path);
 
             // Aggiungi un leggero riflesso in alto per modernità
@@ -641,7 +660,7 @@ Esempi:
                 Color.FromArgb(40, Color.White),
                 Color.Transparent,
                 LinearGradientMode.Vertical);
-            
+
             g.FillPath(highlightBrush, path);
         }
 
