@@ -699,12 +699,36 @@ Esempi:
     {
         private readonly Color _panelColor;
         private const int ScrollBtnSize = 15;
+        private bool _mouseOverScrollbar;
+        private Point _lastMousePos;
 
         public ThemedScrollablePanel(Color panelColor, Color textColor)
         {
             _panelColor = panelColor;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
             UpdateStyles();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            bool overScrollbar = e.X >= Width - SystemInformation.VerticalScrollBarWidth;
+            if (_mouseOverScrollbar != overScrollbar)
+            {
+                _mouseOverScrollbar = overScrollbar;
+                Invalidate();
+            }
+            _lastMousePos = e.Location;
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (_mouseOverScrollbar)
+            {
+                _mouseOverScrollbar = false;
+                Invalidate();
+            }
+            base.OnMouseLeave(e);
         }
 
         protected override void OnScroll(ScrollEventArgs e)
@@ -739,16 +763,23 @@ Esempi:
             int hHeight = SystemInformation.HorizontalScrollBarHeight;
             int margin = 1;
 
+            Color thumbColor = _mouseOverScrollbar
+                ? ControlPaint.Light(_panelColor, 0.2f)
+                : ControlPaint.Light(_panelColor, 0.1f);
+            Color trackColor = _mouseOverScrollbar
+                ? ControlPaint.Light(_panelColor, 0.12f)
+                : ControlPaint.Light(_panelColor, 0.06f);
+
             // ---- Scrollbar verticale ----
             if (vScroll)
             {
                 Rectangle vTrackRect = new Rectangle(Width - vWidth, 0, vWidth, Height - (hScroll ? hHeight : 0));
                 Rectangle vThumbRect = GetVerticalThumbRect(vTrackRect, ScrollBtnSize);
 
-                using (var trackBrush = new SolidBrush(ControlPaint.Light(_panelColor, 0.08f)))
+                using (var trackBrush = new SolidBrush(trackColor))
                     g.FillRectangle(trackBrush, vTrackRect);
 
-                using (var thumbBrush = new SolidBrush(ControlPaint.Dark(_panelColor, 0.15f)))
+                using (var thumbBrush = new SolidBrush(thumbColor))
                     g.FillRectangle(thumbBrush, vThumbRect);
 
                 using (var pen = new Pen(ControlPaint.Dark(_panelColor, 0.3f), 1))
@@ -767,10 +798,10 @@ Esempi:
                 Rectangle hTrackRect = new Rectangle(0, Height - hHeight, Width - (vScroll ? vWidth : 0), hHeight);
                 Rectangle hThumbRect = GetHorizontalThumbRect(hTrackRect, ScrollBtnSize);
 
-                using (var trackBrush = new SolidBrush(ControlPaint.Light(_panelColor, 0.08f)))
+                using (var trackBrush = new SolidBrush(trackColor))
                     g.FillRectangle(trackBrush, hTrackRect);
 
-                using (var thumbBrush = new SolidBrush(ControlPaint.Dark(_panelColor, 0.15f)))
+                using (var thumbBrush = new SolidBrush(thumbColor))
                     g.FillRectangle(thumbBrush, hThumbRect);
 
                 using (var pen = new Pen(ControlPaint.Dark(_panelColor, 0.3f), 1))
