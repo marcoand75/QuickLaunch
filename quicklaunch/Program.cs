@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -6,6 +7,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -204,13 +206,127 @@ Esempi:
         }
     }
 
+    /// <summary>
+    /// Cache delle icone basato su file system con hash del contenuto della cartella.
+    /// La cache si invalida automaticamente quando i file nella cartella cambiano.
+    /// </summary>
+    public static class IconCache
+    {
+        private static readonly ConcurrentDictionary<string, Bitmap> _memoryCache = new();
+        private static readonly ConcurrentDictionary<string, CacheEntry> _metadata = new();
+        private static readonly object _lock = new();
+        private static readonly string _cacheDir;
+
+        static IconCache()
+        {
+            string appName = "QuickLaunch";
+            _cacheDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                appName, "IconCache");
+
+            if (!Directory.Exists(_cacheDir))
+                Directory.CreateDirectory(_cacheDir);
+        }
+
+        private record CacheEntry(string Hash, long LastWriteTime);
+
+        /// <summary>
+        /// Genera un hash univoco basato sul percorso cartella e metadati dei file.
+        /// L'hash si modifica quando un file viene aggiunto, rimosso o modificato.
+        /// </summary>
+        internal static string ComputeFolderHash(string folderPath, string[] files, string extension)
+        {
+            using var sha256 = SHA256.Create();
+            var ms = new MemoryStream();
+            using var sw = new StreamWriter(ms);
+
+            sw.WriteLine(folderPath);
+            sw.WriteLine(extension);
+            sw.WriteLine(files.Length);
+
+            foreach (var f in files)
+            {
+                try
+                {
+                    var fi = new FileInfo(f);
+                    sw.WriteLine($"{fi.FullName}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}");
+                }
+                catch { }
+            }
+
+            sw.Flush();
+            byte[] hash = sha256.ComputeHash(ms.ToArray());
+            return Convert.ToBase64String(hash).Replace('/', '_').Replace('+', '-');
+        }
+
+        /// <summary>
+        /// Recupera un'icona dalla cache in memoria o dal disco.
+        /// Ritorna null se l'icona non è ancora disponibile.
+        /// </summary>
+        internal static Bitmap? GetFromMemory(string key)
+        {
+            return _memoryCache.TryGetValue(key, out var bmp) ? bmp : null;
+        }
+
+        /// <summary>
+        /// Recupera un'icona dalla cache su disco.
+        /// </summary>
+        internal static Bitmap? GetFromDisk(string key)
+        {
+            string cachePath = Path.Combine(_cacheDir, $"{key}.png");
+            if (!File.Exists(cachePath)) return null;
+
+            try
+            {
+                return new Bitmap(cachePath);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Salva un'icona nella cache in memoria e su disco.
+        /// </summary>
+        internal static void Store(string key, Bitmap icon)
+        {
+            _memoryCache[key] = icon;
+
+            try
+            {
+                string cachePath = Path.Combine(_cacheDir, $"{key}.png");
+                icon.Save(cachePath, System.Drawing.Imaging.ImageFormat.Png);
+                _metadata.TryAdd(key, new CacheEntry("", 0));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Invalida la cache se i metadati della cartella sono cambiati.
+        /// </summary>
+        internal static bool TryGetCachedHash(string folderPath, string[] files, string extension, out string cachedHash)
+        {
+            string newHash = ComputeFolderHash(folderPath, files, extension);
+            cachedHash = newHash;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Form principale che mostra i file della cartella con le loro icone.
+    /// Usa cache delle icone e caricamento asincrono per tempi di apertura rapidi.
+    /// </summary>
     public class IconPopup : Form
     {
         private readonly IconPopupConfig _config;
         private readonly string _folderPath;
         private readonly string _fileExtension;
-        private readonly List<IDisposable> _disposables = new List<IDisposable>();
-        private CancellationTokenSource _animationCancellation;
+        private readonly List<IDisposable> _disposables = new();
+        private CancellationTokenSource? _animationCancellation;
+
+        private string[] _files = Array.Empty<string>();
+        private string _cacheFolderHash = string.Empty;
 
         private const int SHADOW_SIZE = 5;
         private const int MAX_FILENAME_LENGTH = 25;
@@ -234,18 +350,16 @@ Esempi:
             ShowInTaskbar = false;
             FormBorderStyle = FormBorderStyle.None;
             BackColor = _config.BackgroundColor;
-            Padding = new Padding(0); // Rimuovi padding per evitare bordi bianchi
+            Padding = new Padding(0);
             TopMost = true;
-            AutoScroll = false; // Disabilita esplicitamente AutoScroll per evitare barre indesiderate
+            AutoScroll = false;
 
-            // Imposta il colore di sfondo immediatamente per evitare flash bianchi
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
             UpdateStyles();
 
             if (_config.EnableAnimations)
                 Opacity = 0;
 
-            // Eventi
             Load += OnFormLoad;
             Deactivate += OnFormDeactivate;
             KeyDown += OnKeyDown;
@@ -253,28 +367,41 @@ Esempi:
             ResumeLayout(false);
         }
 
-        private void CreateUI()
+        private async void CreateUI()
         {
-            var files = GetFilteredFiles();
-            if (!files.Any())
+            _files = GetFilteredFiles();
+            if (!_files.Any())
             {
                 CreateEmptyStateUI();
                 return;
             }
 
+            // Calcola hash cache una sola volta
+            _cacheFolderHash = IconCache.ComputeFolderHash(_folderPath, _files, _fileExtension);
+
             var flowPanel = CreateMainPanel();
-            CreateFileButtons(flowPanel, files);
+            var buttonMap = new Dictionary<string, Button>();
 
-            // Usa un pannello temato che gestisce lo scrolling con scrollbar personalizzate
-            var scrollPanel = new ThemedScrollablePanel(_config.PanelColor, _config.TextColor)
+            // Crea tutti i bottoni con icona di default IMMEDIATAMENTE
+            foreach (string file in _files)
             {
-                Dock = DockStyle.Fill,
-                AutoScroll = true
-            };
-            scrollPanel.Controls.Add(flowPanel);
+                try
+                {
+                    var button = CreateFileButton(file);
+                    flowPanel.Controls.Add(button);
+                    buttonMap[file] = button;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Errore creazione pulsante per {file}: {ex.Message}");
+                }
+            }
 
-            Controls.Add(scrollPanel);
-            AdjustFormSize(scrollPanel, flowPanel);
+            Controls.Add(flowPanel);
+            AdjustFormSize(flowPanel);
+
+            // Carica icone in background e aggiornano i bottoni man mano
+            await LoadIconsAsync(buttonMap);
         }
 
         private string[] GetFilteredFiles()
@@ -297,7 +424,7 @@ Esempi:
 
         private FlowLayoutPanel CreateMainPanel()
         {
-            var panel = new FlowLayoutPanel
+            return new FlowLayoutPanel
             {
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -307,24 +434,6 @@ Esempi:
                 BackColor = _config.PanelColor,
                 BorderStyle = BorderStyle.None
             };
-
-            return panel;
-        }
-
-        private void CreateFileButtons(FlowLayoutPanel panel, string[] files)
-        {
-            foreach (string file in files)
-            {
-                try
-                {
-                    var button = CreateFileButton(file);
-                    panel.Controls.Add(button);
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Errore nella creazione del pulsante per {file}: {ex.Message}");
-                }
-            }
         }
 
         private Button CreateFileButton(string filePath)
@@ -335,17 +444,23 @@ Esempi:
 
             fileName = TruncateFileName(fileName);
 
-            var icon = ExtractFileIcon(filePath);
-            _disposables.Add(icon);
+            // Icona di default immediata (nessuna attesa I/O)
+            var defaultIcon = new Bitmap(_config.IconSize, _config.IconSize);
+            using (var g = Graphics.FromImage(defaultIcon))
+            {
+                g.Clear(_config.PanelColor);
+                using var defIcon = SystemIcons.Application;
+                g.DrawIcon(defIcon, new Rectangle(0, 0, _config.IconSize, _config.IconSize));
+            }
 
             var button = new Button
             {
                 Size = new Size(_config.ButtonWidth, _config.ButtonHeight),
                 Text = fileName,
-                Image = icon,
+                Image = defaultIcon,
                 ImageAlign = ContentAlignment.MiddleLeft,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(8, 0, 5, 0), // Ridotto padding sinistro per eliminare spazio extra
+                Padding = new Padding(8, 0, 5, 0),
                 FlatStyle = FlatStyle.Flat,
                 BackColor = _config.PanelColor,
                 ForeColor = _config.TextColor,
@@ -363,10 +478,68 @@ Esempi:
             button.MouseEnter += (s, e) => button.BackColor = button.FlatAppearance.MouseOverBackColor;
             button.MouseLeave += (s, e) => button.BackColor = _config.PanelColor;
 
+            _disposables.Add(defaultIcon);
             return button;
         }
 
-        private Bitmap ExtractFileIcon(string filePath)
+        /// <summary>
+        /// Carica le icone reali in background e aggiorna i bottoni man mano che vengono trovate.
+        /// Usa la cache in memoria e su disco per evitare ricerche duplicate.
+        /// </summary>
+        private async Task LoadIconsAsync(Dictionary<string, Button> buttonMap)
+        {
+            // Batch size: carica fino a 10 icone alla volta per non bloccare il UI thread troppo a lungo
+            const int batchSize = 10;
+
+            for (int i = 0; i < _files.Length; i += batchSize)
+            {
+                // Piccola pausa per permettere al UI di reagire
+                await Task.Delay(1);
+
+                var batch = _files.Skip(i).Take(batchSize).ToList();
+                await Task.Run(() =>
+                {
+                    foreach (string file in batch)
+                    {
+                        if (!IsHandleCreated) return;
+
+                        string cacheKey = $"{_cacheFolderHash}_{Path.GetFileNameWithoutExtension(file)}";
+
+                        // 1. Controlla cache in memoria
+                        Bitmap? cached = IconCache.GetFromMemory(cacheKey);
+                        if (cached != null)
+                        {
+                            UpdateButtonIcon(buttonMap, file, cached);
+                            continue;
+                        }
+
+                        // 2. Estrai icona (usando cache di sistema Windows già efficiente)
+                        Bitmap? icon = ExtractFileIcon(file);
+                        if (icon == null) continue;
+
+                        // 3. Salva in cache
+                        IconCache.Store(cacheKey, icon);
+                        UpdateButtonIcon(buttonMap, file, icon);
+                    }
+                });
+            }
+        }
+
+        private void UpdateButtonIcon(Dictionary<string, Button> buttonMap, string filePath, Bitmap icon)
+        {
+            if (!IsHandleCreated) return;
+
+            BeginInvoke(new Action(() =>
+            {
+                if (buttonMap.TryGetValue(filePath, out var button) && button.Image != icon)
+                {
+                    button.Image?.Dispose();
+                    button.Image = icon;
+                }
+            }));
+        }
+
+        private Bitmap? ExtractFileIcon(string filePath)
         {
             try
             {
@@ -410,30 +583,22 @@ Esempi:
             Size = new Size(label.Width + Padding.Horizontal, label.Height + Padding.Vertical);
         }
 
-        private void AdjustFormSize(Control scrollPanel, Control flowPanel)
+        private void AdjustFormSize(Control flowPanel)
         {
-            // Forza il layout del pannello per ottenere la PreferredSize corretta
-            flowPanel.Invalidate();
-            flowPanel.Update();
-
-            int panelHeight = flowPanel.PreferredSize.Height;
-            int panelWidth = flowPanel.PreferredSize.Width;
-
-            // Applica la scalatura DPI per supportare monitor ad alta risoluzione
+            // Dimensione DPI scalata una sola volta
             float dpiScale = DeviceDpi / 96.0f;
             int scaledMaxHeight = (int)(_config.MaxHeight * dpiScale);
 
-            // Larghezza scrollbar verticale di sistema
+            int panelHeight = flowPanel.PreferredSize.Height;
+            int panelWidth = flowPanel.PreferredSize.Width;
             int vScrollWidth = SystemInformation.VerticalScrollBarWidth;
 
             if (panelHeight > scaledMaxHeight)
             {
-                // Serve scroll verticale: il form è più largo per accommodare la scrollbar
                 int formWidth = panelWidth + vScrollWidth;
                 Size = new Size(formWidth, scaledMaxHeight);
                 MaximumSize = new Size(formWidth, scaledMaxHeight);
 
-                // Flow panel usa tutta la larghezza disponibile SENZA scrollbar
                 if (flowPanel is FlowLayoutPanel fp)
                 {
                     fp.Width = formWidth;
@@ -442,7 +607,6 @@ Esempi:
             }
             else
             {
-                // Nessuno scroll necessario
                 Size = new Size(panelWidth, panelHeight);
                 MaximumSize = new Size(0, 0);
 
@@ -453,7 +617,6 @@ Esempi:
                 }
             }
 
-            // Applica gli angoli arrotondati dopo che il form è completamente inizializzato
             if (_config.CornerRadius > 0)
             {
                 Load += (s, e) =>
@@ -490,24 +653,19 @@ Esempi:
                 using var path = new GraphicsPath();
                 int radius = Math.Min(_config.CornerRadius, Math.Min(Width, Height) / 2);
 
-                // Crea un percorso arrotondato più visibile e preciso
-                path.AddArc(0, 0, radius * 2, radius * 2, 180, 90); // Alto sinistra
-                path.AddArc(Width - radius * 2, 0, radius * 2, radius * 2, 270, 90); // Alto destra
-                path.AddArc(Width - radius * 2, Height - radius * 2, radius * 2, radius * 2, 0, 90); // Basso destra
-                path.AddArc(0, Height - radius * 2, radius * 2, radius * 2, 90, 90); // Basso sinistra
+                path.AddArc(0, 0, radius * 2, radius * 2, 180, 90);
+                path.AddArc(Width - radius * 2, 0, radius * 2, radius * 2, 270, 90);
+                path.AddArc(Width - radius * 2, Height - radius * 2, radius * 2, radius * 2, 0, 90);
+                path.AddArc(0, Height - radius * 2, radius * 2, radius * 2, 90, 90);
                 path.CloseFigure();
 
-                // Applica la regione arrotondata
                 Region = new Region(path);
-
-                // Forza il ridisegno per mostrare gli angoli arrotondati
                 Invalidate();
                 Update();
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Errore nell'applicare gli angoli arrotondati: {ex.Message}");
-                // Fallback: usa una regione rettangolare
+                Debug.WriteLine($"Errore angoli arrotondati: {ex.Message}");
                 Region = new Region(new Rectangle(0, 0, Width, Height));
             }
         }
@@ -541,10 +699,7 @@ Esempi:
                     await Task.Delay(_config.AnimationSpeed, cancellationToken);
                 }
             }
-            catch (OperationCanceledException)
-            {
-                // Animazione cancellata
-            }
+            catch (OperationCanceledException) { }
         }
 
         private void OnFileButtonClick(object sender, EventArgs e)
@@ -579,13 +734,9 @@ Esempi:
         private void OnFormDeactivate(object sender, EventArgs e)
         {
             if (IsHandleCreated)
-            {
                 BeginInvoke(new Action(Close));
-            }
             else
-            {
                 Close();
-            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -594,9 +745,7 @@ Esempi:
             _animationCancellation?.Dispose();
 
             foreach (var disposable in _disposables)
-            {
                 disposable?.Dispose();
-            }
             _disposables.Clear();
 
             base.OnFormClosed(e);
@@ -604,8 +753,6 @@ Esempi:
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            base.OnPaint(e);
-
             if (_config.EnableGlassEffect && _config.CornerRadius > 0)
             {
                 DrawModernEffect(e.Graphics);
@@ -616,21 +763,20 @@ Esempi:
         {
             if (Width <= 0 || Height <= 0) return;
 
-            // Crea un percorso per gli angoli arrotondati
             using var path = new GraphicsPath();
             int radius = Math.Min(_config.CornerRadius, Math.Min(Width, Height) / 2);
 
-            // Assicurati che tutti gli angoli siano arrotondati correttamente
-            path.AddArc(0, 0, radius * 2, radius * 2, 180, 90); // Alto sinistra
-            path.AddArc(Width - radius * 2, 0, radius * 2, radius * 2, 270, 90); // Alto destra
-            path.AddArc(Width - radius * 2, Height - radius * 2, radius * 2, radius * 2, 0, 90); // Basso destra
-            path.AddArc(0, Height - radius * 2, radius * 2, radius * 2, 90, 90); // Basso sinistra
+            path.AddArc(0, 0, radius * 2, radius * 2, 180, 90);
+            path.AddArc(Width - radius * 2, 0, radius * 2, radius * 2, 270, 90);
+            path.AddArc(Width - radius * 2, Height - radius * 2, radius * 2, radius * 2, 0, 90);
+            path.AddArc(0, Height - radius * 2, radius * 2, radius * 2, 90, 90);
             path.CloseFigure();
 
-            // Disegna un'ombra sofisticata
-            DrawShadowEffect(g, path, radius);
+            // Ombra semplificata: un solo livello invece di 3
+            using var shadowBrush = new SolidBrush(Color.FromArgb(15, Color.Black));
+            g.FillPath(shadowBrush, path);
 
-            // Disegna un bordo sottile e moderno
+            // Bordo
             if (_config.BorderThickness > 0)
             {
                 var borderColor = ColorTranslator.FromHtml(_config.BorderColorHex);
@@ -638,47 +784,20 @@ Esempi:
                 g.DrawPath(borderPen, path);
             }
 
-            // Aggiungi un effetto di gradiente moderno
-            DrawModernGradient(g, path);
-        }
-
-        private void DrawShadowEffect(Graphics g, GraphicsPath path, int radius)
-        {
-            // Crea un'ombra morbida attorno al pannello
-            for (int i = 0; i < 3; i++)
-            {
-                using var shadowPath = new GraphicsPath();
-                int offset = i + 1;
-
-                shadowPath.AddArc(offset, offset, radius * 2, radius * 2, 180, 90);
-                shadowPath.AddArc(Width - radius * 2 - offset, offset, radius * 2, radius * 2, 270, 90);
-                shadowPath.AddArc(Width - radius * 2 - offset, Height - radius * 2 - offset, radius * 2, radius * 2, 0, 90);
-                shadowPath.AddArc(offset, Height - radius * 2 - offset, radius * 2, radius * 2, 90, 90);
-                shadowPath.CloseFigure();
-
-                using var shadowBrush = new SolidBrush(Color.FromArgb(20 - i * 5, Color.Black));
-                g.FillPath(shadowBrush, shadowPath);
-            }
-        }
-
-        private void DrawModernGradient(Graphics g, GraphicsPath path)
-        {
-            // Gradiente moderno che crea profondità
+            // Gradiente
             using var gradientBrush = new LinearGradientBrush(
                 new Rectangle(0, 0, Width, Height),
                 Color.FromArgb(250, _config.PanelColor),
                 ControlPaint.Light(_config.PanelColor, 0.05f),
                 LinearGradientMode.Vertical);
-
             g.FillPath(gradientBrush, path);
 
-            // Aggiungi un leggero riflesso in alto per modernità
+            // Riflesso
             using var highlightBrush = new LinearGradientBrush(
                 new Rectangle(0, 0, Width, Height / 4),
                 Color.FromArgb(40, Color.White),
                 Color.Transparent,
                 LinearGradientMode.Vertical);
-
             g.FillPath(highlightBrush, path);
         }
 
@@ -687,29 +806,26 @@ Esempi:
             get
             {
                 var cp = base.CreateParams;
-                cp.ExStyle |= 0x00080000; // WS_EX_LAYERED per trasparenza
+                cp.ExStyle |= 0x00080000; // WS_EX_LAYERED
                 return cp;
             }
         }
     }
 
     /// <summary>
-    /// Pannello con scrollbar personalizzata che rispetta il tema dell'applicazione.
-    /// La scrollbar orizzontale è rimossa a livello Win32 tramite CreateParams.
+    /// Pannello con scrollbar personalizzata. La scrollbar orizzontale è rimossa a livello Win32.
     /// </summary>
     public class ThemedScrollablePanel : Panel
     {
         private readonly Color _panelColor;
         private const int ScrollBtnSize = 15;
         private bool _mouseOverScrollbar;
-        private Point _lastMousePos;
 
         public ThemedScrollablePanel(Color panelColor, Color textColor)
         {
             _panelColor = panelColor;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
             UpdateStyles();
-            // Disabilita le scrollbar di sistema: gestiamo solo quelle tematiche
             AutoScroll = false;
             HScroll = false;
             VScroll = false;
@@ -720,8 +836,7 @@ Esempi:
             get
             {
                 var cp = base.CreateParams;
-                // Rimuovi WS_HSCROLL (0x00100000) per impedire qualsiasi scrollbar orizzontale di sistema
-                cp.Style &= ~0x00100000;
+                cp.Style &= ~0x00100000; // Rimuovi WS_HSCROLL
                 return cp;
             }
         }
@@ -734,7 +849,6 @@ Esempi:
                 _mouseOverScrollbar = overScrollbar;
                 Invalidate();
             }
-            _lastMousePos = e.Location;
             base.OnMouseMove(e);
         }
 
@@ -760,19 +874,8 @@ Esempi:
             if (!IsHandleCreated) return;
 
             int vWidth = SystemInformation.VerticalScrollBarWidth;
-            bool showVScroll = VerticalScroll.Visible;
-            bool showHScroll = HorizontalScroll.Visible;
-
-            // Disegna scrollbar verticale personalizzata se presente
-            if (showVScroll && !showHScroll)
-            {
+            if (VerticalScroll.Visible)
                 DrawVerticalScrollbar(e.Graphics, vWidth);
-            }
-            else if (showVScroll && showHScroll)
-            {
-                // Entrambe presenti: disegna solo verticale, maschera orizzontale
-                DrawVerticalScrollbar(e.Graphics, vWidth);
-            }
         }
 
         private void DrawVerticalScrollbar(Graphics g, int vWidth)
@@ -785,12 +888,10 @@ Esempi:
                 ? ControlPaint.Light(_panelColor, 0.12f)
                 : ControlPaint.Light(_panelColor, 0.06f);
 
-            // Track
             Rectangle vTrackRect = new Rectangle(Width - vWidth, 0, vWidth, Height);
             using (var trackBrush = new SolidBrush(trackColor))
                 g.FillRectangle(trackBrush, vTrackRect);
 
-            // Thumb
             float ratio = (float)(vTrackRect.Height - 2 * ScrollBtnSize) /
                           (VerticalScroll.Maximum - VerticalScroll.Minimum + VerticalScroll.LargeChange);
             int thumbHeight = Math.Max((int)(ratio * VerticalScroll.LargeChange), 20);
@@ -802,7 +903,6 @@ Esempi:
             using (var pen = new Pen(ControlPaint.Dark(_panelColor, 0.3f), 1))
                 g.DrawRectangle(pen, vThumbRect.X, vThumbRect.Y, vThumbRect.Width - 1, vThumbRect.Height - 1);
 
-            // Frecce
             if (VerticalScroll.Value > VerticalScroll.Minimum)
                 DrawScrollArrow(g, new Rectangle(Width - vWidth + margin, margin, vWidth - margin * 2, ScrollBtnSize), ScrollArrow.Up);
 
@@ -852,9 +952,7 @@ Esempi:
             const int WM_SIZE = 0x0005;
             const int WM_DISPLAYCHANGE = 0x007E;
             if (m.Msg == WM_SIZE || m.Msg == WM_DISPLAYCHANGE)
-            {
                 Invalidate();
-            }
             base.WndProc(ref m);
         }
     }
