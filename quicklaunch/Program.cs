@@ -235,6 +235,7 @@ Esempi:
             BackColor = _config.BackgroundColor;
             Padding = new Padding(0); // Rimuovi padding per evitare bordi bianchi
             TopMost = true;
+            AutoScroll = false; // Disabilita esplicitamente AutoScroll per evitare barre indesiderate
 
             // Imposta il colore di sfondo immediatamente per evitare flash bianchi
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
@@ -421,35 +422,31 @@ Esempi:
             float dpiScale = DeviceDpi / 96.0f;
             int scaledMaxHeight = (int)(_config.MaxHeight * dpiScale);
 
-            // La larghezza deve includere lo spazio per la scrollbar verticale se necessaria
-            bool needsVerticalScroll = panelHeight > scaledMaxHeight;
-            int vScrollBarWidth = needsVerticalScroll ? SystemInformation.VerticalScrollBarWidth : 0;
-            int formWidth = panelWidth + vScrollBarWidth;
-            // Arrotonda al multiplo più vicino per evitare bordi frastagliati
-            formWidth = (formWidth / 4) * 4;
-
+            // La larghezza del form è esattamente quella del contenuto, senza spazio per scrollbar
+            // (la scrollbar verticale sarà disegnata a mano dal ThemedScrollablePanel)
             Size = new Size(
-                formWidth,
+                panelWidth,
                 Math.Min(panelHeight, scaledMaxHeight)
             );
 
-            // Se il contenuto eccede l'altezza massima, la scrollbar verticale gestisce lo scroll
-            // Il form non ha AutoScroll per evitare la barra orizzontale indesiderata
-            if (needsVerticalScroll)
+            // Configura il pannello di scroll
+            if (panelHeight > scaledMaxHeight)
             {
-                MaximumSize = new Size(formWidth, scaledMaxHeight);
+                // Contenuto più alto della max height: abilita solo scroll verticale
+                scrollPanel.MaximumSize = new Size(panelWidth, scaledMaxHeight);
                 if (flowPanel is FlowLayoutPanel fp)
                 {
-                    // Larghezza esatta del contenitore senza scrollbar
-                    fp.Width = formWidth - vScrollBarWidth;
-                    fp.MaximumSize = new Size(fp.Width, 0);
+                    fp.Width = panelWidth;
+                    fp.MaximumSize = new Size(panelWidth, 0);
                 }
             }
             else
             {
+                // Contenuto che rientra: nessuna scrollbar
+                scrollPanel.MaximumSize = new Size(panelWidth, 0);
                 if (flowPanel is FlowLayoutPanel fp)
                 {
-                    fp.MaximumSize = new Size(0, 0);
+                    fp.MaximumSize = new Size(panelWidth, 0);
                 }
             }
 
@@ -709,8 +706,11 @@ Esempi:
             _panelColor = panelColor;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
             UpdateStyles();
-            // Disabilita completamente la scrollbar orizzontale
+            // Disabilita completamente entrambe le scrollbar di sistema
             HScroll = false;
+            VScroll = false;
+            AutoScroll = true; // Abilita solo lo scroll logico, non le barre di sistema
+            AutoScrollMinSize = new Size(0, 0);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -758,8 +758,9 @@ Esempi:
 
         private void DrawThemedScrollbars(Graphics g)
         {
-            // Disegna SOLO la scrollbar verticale, HScroll è sempre disabilitato
-            if (!AutoScroll || !VScroll) return;
+            // Disegna SOLO la scrollbar verticale quando il contenuto supera l'altezza massima
+            // HScroll è sempre disabilitato, quindi nessuna barra orizzontale
+            if (!AutoScroll || !VScroll || HScroll) return;
 
             int vWidth = SystemInformation.VerticalScrollBarWidth;
             int margin = 1;
