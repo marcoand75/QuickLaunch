@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -422,30 +423,32 @@ Esempi:
             float dpiScale = DeviceDpi / 96.0f;
             int scaledMaxHeight = (int)(_config.MaxHeight * dpiScale);
 
-            // La larghezza del form è esattamente quella del contenuto, senza spazio per scrollbar
-            // (la scrollbar verticale sarà disegnata a mano dal ThemedScrollablePanel)
-            Size = new Size(
-                panelWidth,
-                Math.Min(panelHeight, scaledMaxHeight)
-            );
+            // Larghezza scrollbar verticale di sistema
+            int vScrollWidth = SystemInformation.VerticalScrollBarWidth;
 
-            // Configura il pannello di scroll
             if (panelHeight > scaledMaxHeight)
             {
-                // Contenuto più alto della max height: abilita solo scroll verticale
-                scrollPanel.MaximumSize = new Size(panelWidth, scaledMaxHeight);
+                // Serve scroll verticale: il form è più largo per accommodare la scrollbar
+                int formWidth = panelWidth + vScrollWidth;
+                Size = new Size(formWidth, scaledMaxHeight);
+                MaximumSize = new Size(formWidth, scaledMaxHeight);
+
+                // Flow panel usa tutta la larghezza disponibile SENZA scrollbar
                 if (flowPanel is FlowLayoutPanel fp)
                 {
-                    fp.Width = panelWidth;
-                    fp.MaximumSize = new Size(panelWidth, 0);
+                    fp.Width = formWidth;
+                    fp.MaximumSize = new Size(formWidth, 0);
                 }
             }
             else
             {
-                // Contenuto che rientra: nessuna scrollbar
-                scrollPanel.MaximumSize = new Size(panelWidth, 0);
+                // Nessuno scroll necessario
+                Size = new Size(panelWidth, panelHeight);
+                MaximumSize = new Size(0, 0);
+
                 if (flowPanel is FlowLayoutPanel fp)
                 {
+                    fp.Width = panelWidth;
                     fp.MaximumSize = new Size(panelWidth, 0);
                 }
             }
@@ -692,7 +695,7 @@ Esempi:
 
     /// <summary>
     /// Pannello con scrollbar personalizzata che rispetta il tema dell'applicazione.
-    /// Elimina lo sfondo bianco delle scrollbar di sistema.
+    /// La scrollbar orizzontale è rimossa a livello Win32 tramite CreateParams.
     /// </summary>
     public class ThemedScrollablePanel : Panel
     {
@@ -706,11 +709,21 @@ Esempi:
             _panelColor = panelColor;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
             UpdateStyles();
-            // Disabilita completamente entrambe le scrollbar di sistema
+            // Disabilita le scrollbar di sistema: gestiamo solo quelle tematiche
+            AutoScroll = false;
             HScroll = false;
             VScroll = false;
-            AutoScroll = true; // Abilita solo lo scroll logico, non le barre di sistema
-            AutoScrollMinSize = new Size(0, 0);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                // Rimuovi WS_HSCROLL (0x00100000) per impedire qualsiasi scrollbar orizzontale di sistema
+                cp.Style &= ~0x00100000;
+                return cp;
+            }
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -735,12 +748,6 @@ Esempi:
             base.OnMouseLeave(e);
         }
 
-        protected override void OnScroll(ScrollEventArgs e)
-        {
-            Invalidate();
-            base.OnScroll(e);
-        }
-
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             e.Graphics.Clear(_panelColor);
@@ -750,21 +757,27 @@ Esempi:
         {
             base.OnPaint(e);
 
-            if (AutoScroll && IsHandleCreated)
+            if (!IsHandleCreated) return;
+
+            int vWidth = SystemInformation.VerticalScrollBarWidth;
+            bool showVScroll = VerticalScroll.Visible;
+            bool showHScroll = HorizontalScroll.Visible;
+
+            // Disegna scrollbar verticale personalizzata se presente
+            if (showVScroll && !showHScroll)
             {
-                DrawThemedScrollbars(e.Graphics);
+                DrawVerticalScrollbar(e.Graphics, vWidth);
+            }
+            else if (showVScroll && showHScroll)
+            {
+                // Entrambe presenti: disegna solo verticale, maschera orizzontale
+                DrawVerticalScrollbar(e.Graphics, vWidth);
             }
         }
 
-        private void DrawThemedScrollbars(Graphics g)
+        private void DrawVerticalScrollbar(Graphics g, int vWidth)
         {
-            // Disegna SOLO la scrollbar verticale quando il contenuto supera l'altezza massima
-            // HScroll è sempre disabilitato, quindi nessuna barra orizzontale
-            if (!AutoScroll || !VScroll || HScroll) return;
-
-            int vWidth = SystemInformation.VerticalScrollBarWidth;
             int margin = 1;
-
             Color thumbColor = _mouseOverScrollbar
                 ? ControlPaint.Light(_panelColor, 0.2f)
                 : ControlPaint.Light(_panelColor, 0.1f);
@@ -772,33 +785,29 @@ Esempi:
                 ? ControlPaint.Light(_panelColor, 0.12f)
                 : ControlPaint.Light(_panelColor, 0.06f);
 
-            // ---- Scrollbar verticale ----
+            // Track
             Rectangle vTrackRect = new Rectangle(Width - vWidth, 0, vWidth, Height);
-            Rectangle vThumbRect = GetVerticalThumbRect(vTrackRect, ScrollBtnSize);
-
             using (var trackBrush = new SolidBrush(trackColor))
                 g.FillRectangle(trackBrush, vTrackRect);
 
+            // Thumb
+            float ratio = (float)(vTrackRect.Height - 2 * ScrollBtnSize) /
+                          (VerticalScroll.Maximum - VerticalScroll.Minimum + VerticalScroll.LargeChange);
+            int thumbHeight = Math.Max((int)(ratio * VerticalScroll.LargeChange), 20);
+            int thumbTop = ScrollBtnSize + (int)((VerticalScroll.Value - VerticalScroll.Minimum) * ratio);
+            Rectangle vThumbRect = new Rectangle(Width - vWidth + 1, thumbTop, vWidth - 2, thumbHeight);
+
             using (var thumbBrush = new SolidBrush(thumbColor))
                 g.FillRectangle(thumbBrush, vThumbRect);
-
             using (var pen = new Pen(ControlPaint.Dark(_panelColor, 0.3f), 1))
                 g.DrawRectangle(pen, vThumbRect.X, vThumbRect.Y, vThumbRect.Width - 1, vThumbRect.Height - 1);
 
-            if (VerticalScroll.Visible && VerticalScroll.Value > VerticalScroll.Minimum)
+            // Frecce
+            if (VerticalScroll.Value > VerticalScroll.Minimum)
                 DrawScrollArrow(g, new Rectangle(Width - vWidth + margin, margin, vWidth - margin * 2, ScrollBtnSize), ScrollArrow.Up);
 
-            if (VerticalScroll.Visible && VerticalScroll.Value < VerticalScroll.Maximum)
+            if (VerticalScroll.Value < VerticalScroll.Maximum)
                 DrawScrollArrow(g, new Rectangle(Width - vWidth + margin, Height - ScrollBtnSize - margin, vWidth - margin * 2, ScrollBtnSize), ScrollArrow.Down);
-        }
-
-        private Rectangle GetVerticalThumbRect(Rectangle trackRect, int btnSize)
-        {
-            if (!VerticalScroll.Visible) return Rectangle.Empty;
-            float ratio = (float)(trackRect.Height - 2 * btnSize) / (VerticalScroll.Maximum - VerticalScroll.Minimum + VerticalScroll.LargeChange);
-            int thumbHeight = Math.Max((int)(ratio * VerticalScroll.LargeChange), 20);
-            int thumbTop = trackRect.Top + btnSize + (int)((VerticalScroll.Value - VerticalScroll.Minimum) * ratio);
-            return new Rectangle(trackRect.Left + 1, thumbTop, trackRect.Width - 2, thumbHeight);
         }
 
         private void DrawScrollArrow(Graphics g, Rectangle rect, ScrollArrow arrow)
