@@ -260,11 +260,19 @@ Esempi:
                 return;
             }
 
-            var panel = CreateMainPanel();
-            CreateFileButtons(panel, files);
+            var flowPanel = CreateMainPanel();
+            CreateFileButtons(flowPanel, files);
 
-            Controls.Add(panel);
-            AdjustFormSize(panel);
+            // Usa un pannello temato che gestisce lo scrolling con scrollbar personalizzate
+            var scrollPanel = new ThemedScrollablePanel(_config.PanelColor, _config.TextColor)
+            {
+                Dock = DockStyle.Fill,
+                AutoScroll = true
+            };
+            scrollPanel.Controls.Add(flowPanel);
+
+            Controls.Add(scrollPanel);
+            AdjustFormSize(scrollPanel, flowPanel);
         }
 
         private string[] GetFilteredFiles()
@@ -400,39 +408,47 @@ Esempi:
             Size = new Size(label.Width + Padding.Horizontal, label.Height + Padding.Vertical);
         }
 
-        private void AdjustFormSize(Control panel)
+        private void AdjustFormSize(Control scrollPanel, Control flowPanel)
         {
             // Forza il layout del pannello per ottenere la PreferredSize corretta
-            panel.Invalidate();
-            panel.Update();
+            flowPanel.Invalidate();
+            flowPanel.Update();
 
-            int panelHeight = panel.PreferredSize.Height;
-            int panelWidth = panel.PreferredSize.Width;
+            int panelHeight = flowPanel.PreferredSize.Height;
+            int panelWidth = flowPanel.PreferredSize.Width;
 
             // Applica la scalatura DPI per supportare monitor ad alta risoluzione
             float dpiScale = DeviceDpi / 96.0f;
             int scaledMaxHeight = (int)(_config.MaxHeight * dpiScale);
 
+            // La larghezza deve includere lo spazio per la scrollbar verticale se necessaria
+            bool needsVerticalScroll = panelHeight > scaledMaxHeight;
+            int formWidth = panelWidth + (needsVerticalScroll ? SystemInformation.VerticalScrollBarWidth : 0);
+            // Arrotonda al multiplo più vicino per evitare bordi frastagliati
+            formWidth = (formWidth / 4) * 4;
+
             Size = new Size(
-                panelWidth,
+                formWidth,
                 Math.Min(panelHeight, scaledMaxHeight)
             );
 
-            // Abilita AutoScroll sul form per gestire i contenuti che eccedono l'altezza massima
-            if (panelHeight > scaledMaxHeight)
+            // Se il contenuto eccede l'altezza massima, la scrollbar verticale gestisce lo scroll
+            // Il form non ha AutoScroll per evitare la barra orizzontale indesiderata
+            if (needsVerticalScroll)
             {
-                AutoScroll = true;
-                AutoScrollMargin = new Size(0, 10);
-                MaximumSize = new Size(0, scaledMaxHeight);
-
-                if (panel is FlowLayoutPanel flowPanel)
+                MaximumSize = new Size(formWidth, scaledMaxHeight);
+                if (flowPanel is FlowLayoutPanel fp)
                 {
-                    flowPanel.AutoScroll = true;
+                    fp.Width = formWidth - SystemInformation.VerticalScrollBarWidth;
+                    fp.MaximumSize = new Size(fp.Width, 0);
                 }
             }
             else
             {
-                AutoScroll = false;
+                if (flowPanel is FlowLayoutPanel fp)
+                {
+                    fp.MaximumSize = new Size(0, 0);
+                }
             }
 
             // Applica gli angoli arrotondati dopo che il form è completamente inizializzato
@@ -672,6 +688,173 @@ Esempi:
                 cp.ExStyle |= 0x00080000; // WS_EX_LAYERED per trasparenza
                 return cp;
             }
+        }
+    }
+
+    /// <summary>
+    /// Pannello con scrollbar personalizzata che rispetta il tema dell'applicazione.
+    /// Elimina lo sfondo bianco delle scrollbar di sistema.
+    /// </summary>
+    public class ThemedScrollablePanel : Panel
+    {
+        private readonly Color _panelColor;
+        private const int ScrollBtnSize = 15;
+
+        public ThemedScrollablePanel(Color panelColor, Color textColor)
+        {
+            _panelColor = panelColor;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
+            UpdateStyles();
+        }
+
+        protected override void OnScroll(ScrollEventArgs e)
+        {
+            Invalidate();
+            base.OnScroll(e);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.Clear(_panelColor);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+
+            if (AutoScroll && IsHandleCreated)
+            {
+                DrawThemedScrollbars(e.Graphics);
+            }
+        }
+
+        private void DrawThemedScrollbars(Graphics g)
+        {
+            var hScroll = AutoScroll && HScroll;
+            var vScroll = AutoScroll && VScroll;
+
+            if (!vScroll && !hScroll) return;
+
+            int vWidth = SystemInformation.VerticalScrollBarWidth;
+            int hHeight = SystemInformation.HorizontalScrollBarHeight;
+            int margin = 1;
+
+            // ---- Scrollbar verticale ----
+            if (vScroll)
+            {
+                Rectangle vTrackRect = new Rectangle(Width - vWidth, 0, vWidth, Height - (hScroll ? hHeight : 0));
+                Rectangle vThumbRect = GetVerticalThumbRect(vTrackRect, ScrollBtnSize);
+
+                using (var trackBrush = new SolidBrush(ControlPaint.Light(_panelColor, 0.08f)))
+                    g.FillRectangle(trackBrush, vTrackRect);
+
+                using (var thumbBrush = new SolidBrush(ControlPaint.Dark(_panelColor, 0.15f)))
+                    g.FillRectangle(thumbBrush, vThumbRect);
+
+                using (var pen = new Pen(ControlPaint.Dark(_panelColor, 0.3f), 1))
+                    g.DrawRectangle(pen, vThumbRect.X, vThumbRect.Y, vThumbRect.Width - 1, vThumbRect.Height - 1);
+
+                if (VerticalScroll.Visible && VerticalScroll.Value > VerticalScroll.Minimum)
+                    DrawScrollArrow(g, new Rectangle(Width - vWidth + margin, margin, vWidth - margin * 2, ScrollBtnSize), ScrollArrow.Up);
+
+                if (VerticalScroll.Visible && VerticalScroll.Value < VerticalScroll.Maximum)
+                    DrawScrollArrow(g, new Rectangle(Width - vWidth + margin, Height - hHeight - ScrollBtnSize - margin, vWidth - margin * 2, ScrollBtnSize), ScrollArrow.Down);
+            }
+
+            // ---- Scrollbar orizzontale ----
+            if (hScroll)
+            {
+                Rectangle hTrackRect = new Rectangle(0, Height - hHeight, Width - (vScroll ? vWidth : 0), hHeight);
+                Rectangle hThumbRect = GetHorizontalThumbRect(hTrackRect, ScrollBtnSize);
+
+                using (var trackBrush = new SolidBrush(ControlPaint.Light(_panelColor, 0.08f)))
+                    g.FillRectangle(trackBrush, hTrackRect);
+
+                using (var thumbBrush = new SolidBrush(ControlPaint.Dark(_panelColor, 0.15f)))
+                    g.FillRectangle(thumbBrush, hThumbRect);
+
+                using (var pen = new Pen(ControlPaint.Dark(_panelColor, 0.3f), 1))
+                    g.DrawRectangle(pen, hThumbRect.X, hThumbRect.Y, hThumbRect.Width - 1, hThumbRect.Height - 1);
+
+                if (HorizontalScroll.Visible && HorizontalScroll.Value > HorizontalScroll.Minimum)
+                    DrawScrollArrow(g, new Rectangle(margin, Height - hHeight + margin, ScrollBtnSize, hHeight - margin * 2), ScrollArrow.Left);
+
+                if (HorizontalScroll.Visible && HorizontalScroll.Value < HorizontalScroll.Maximum)
+                    DrawScrollArrow(g, new Rectangle(Width - vWidth - ScrollBtnSize - margin, Height - hHeight + margin, ScrollBtnSize, hHeight - margin * 2), ScrollArrow.Right);
+            }
+
+            // ---- Angolo in basso a destra ----
+            if (vScroll && hScroll)
+            {
+                using (var cornerBrush = new SolidBrush(ControlPaint.Light(_panelColor, 0.05f)))
+                    g.FillRectangle(cornerBrush, Width - vWidth, Height - hHeight, vWidth, hHeight);
+            }
+        }
+
+        private Rectangle GetVerticalThumbRect(Rectangle trackRect, int btnSize)
+        {
+            if (!VerticalScroll.Visible) return Rectangle.Empty;
+            float ratio = (float)(trackRect.Height - 2 * btnSize) / (VerticalScroll.Maximum - VerticalScroll.Minimum + VerticalScroll.LargeChange);
+            int thumbHeight = Math.Max((int)(ratio * VerticalScroll.LargeChange), 20);
+            int thumbTop = trackRect.Top + btnSize + (int)((VerticalScroll.Value - VerticalScroll.Minimum) * ratio);
+            return new Rectangle(trackRect.Left + 1, thumbTop, trackRect.Width - 2, thumbHeight);
+        }
+
+        private Rectangle GetHorizontalThumbRect(Rectangle trackRect, int btnSize)
+        {
+            if (!HorizontalScroll.Visible) return Rectangle.Empty;
+            float ratio = (float)(trackRect.Width - 2 * btnSize) / (HorizontalScroll.Maximum - HorizontalScroll.Minimum + HorizontalScroll.LargeChange);
+            int thumbWidth = Math.Max((int)(ratio * HorizontalScroll.LargeChange), 20);
+            int thumbLeft = trackRect.Left + btnSize + (int)((HorizontalScroll.Value - HorizontalScroll.Minimum) * ratio);
+            return new Rectangle(thumbLeft, trackRect.Top + 1, thumbWidth, trackRect.Height - 2);
+        }
+
+        private void DrawScrollArrow(Graphics g, Rectangle rect, ScrollArrow arrow)
+        {
+            using (var brush = new SolidBrush(ControlPaint.Dark(_panelColor, 0.2f)))
+                g.FillRectangle(brush, rect);
+
+            using (var pen = new Pen(ControlPaint.Dark(_panelColor, 0.4f), 1))
+            {
+                int cx = rect.X + rect.Width / 2;
+                int cy = rect.Y + rect.Height / 2;
+                int size = Math.Min(rect.Width, rect.Height) / 3;
+
+                g.DrawLine(pen, cx - size / 2, cy, cx + size / 2, cy);
+
+                switch (arrow)
+                {
+                    case ScrollArrow.Up:
+                        g.DrawLine(pen, cx, cy - size / 2, cx - size / 2, cy + size / 2);
+                        g.DrawLine(pen, cx, cy - size / 2, cx + size / 2, cy + size / 2);
+                        break;
+                    case ScrollArrow.Down:
+                        g.DrawLine(pen, cx, cy + size / 2, cx - size / 2, cy - size / 2);
+                        g.DrawLine(pen, cx, cy + size / 2, cx + size / 2, cy - size / 2);
+                        break;
+                    case ScrollArrow.Left:
+                        g.DrawLine(pen, cx - size / 2, cy, cx + size / 2, cy - size / 2);
+                        g.DrawLine(pen, cx - size / 2, cy, cx + size / 2, cy + size / 2);
+                        break;
+                    case ScrollArrow.Right:
+                        g.DrawLine(pen, cx + size / 2, cy, cx - size / 2, cy - size / 2);
+                        g.DrawLine(pen, cx + size / 2, cy, cx - size / 2, cy + size / 2);
+                        break;
+                }
+            }
+        }
+
+        private enum ScrollArrow { Up, Down, Left, Right }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_SIZE = 0x0005;
+            const int WM_DISPLAYCHANGE = 0x007E;
+            if (m.Msg == WM_SIZE || m.Msg == WM_DISPLAYCHANGE)
+            {
+                Invalidate();
+            }
+            base.WndProc(ref m);
         }
     }
 }
